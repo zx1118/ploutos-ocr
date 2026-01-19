@@ -109,7 +109,7 @@ class OcrSettings(BaseSettings):
     
     # DocLayout-YOLO layout analysis (方案 B - MinerU 级别)
     use_doclayout_yolo: bool = Field(
-        default=False,
+        default=True,
         description="Use DocLayout-YOLO for MinerU-level layout analysis (方案 B)"
     )
     doclayout_model_path: Optional[str] = Field(
@@ -300,4 +300,3 @@ settings_watcher = SettingsWatcher()
 
 # Convenience export
 settings = get_settings()
-

@@ -687,6 +687,8 @@ class OCRConsumer:
         from .ocr.row_clustering import (
             cluster_ocr_blocks_to_rows, 
             extract_table_structure_advanced,
+            build_document_structure,
+            build_layout_text,
         )
         
         if not ocr_result.blocks:
@@ -705,6 +707,7 @@ class OCRConsumer:
         # Cluster into rows
         rows = cluster_ocr_blocks_to_rows(blocks_dict)
         ocr_result.rows = rows
+        ocr_result.layout_text = build_layout_text(rows)
         
         # Extract table structure (with advanced column detection and segmentation)
         try:
@@ -725,6 +728,7 @@ class OCRConsumer:
                 logger.debug(f"Template matching skipped: {e}")
             
             ocr_result.table_structure = table_structure
+            ocr_result.document_structure = build_document_structure(rows, table_structure)
             
             regions = table_structure.get("regions", {})
             logger.info(
@@ -736,6 +740,7 @@ class OCRConsumer:
         except Exception as e:
             logger.warning(f"Table structure extraction failed: {e}")
             ocr_result.table_structure = None
+            ocr_result.document_structure = build_document_structure(rows, None)
 
     def _process_evidence_enrich(self, message: StreamMessage, start_time: float) -> None:
         """Process evidence enrichment task - match fields to OCR bboxes."""

@@ -149,6 +149,12 @@ class OCRResult:
     
     # Row-level structure (blocks clustered into rows)
     rows: List[Dict[str, Any]] = field(default_factory=list)
+
+    # Layout-aware text (rows joined with newline)
+    layout_text: str = ""
+
+    # Document structure (MinerU-style)
+    document_structure: Optional[Dict[str, Any]] = None
     
     # Table structure (columns + rows) - from row clustering
     table_structure: Optional[Dict[str, Any]] = None
@@ -181,8 +187,10 @@ class OCRResult:
         """Convert to dictionary for JSON serialization with safe types."""
         return to_python_type({
             "fullText": str(self.full_text) if self.full_text else "",
+            "layoutText": str(self.layout_text) if self.layout_text else "",
             "blocks": [b.to_dict() for b in self.blocks],
             "rows": self.rows if self.rows else [],
+            "documentStructure": self.document_structure if self.document_structure else None,
             "tableStructure": self.table_structure if self.table_structure else None,
             "tables": self.tables if self.tables else [],  # PPStructure 表格
             "layoutAnalysis": self.layout_analysis if self.layout_analysis else None,
@@ -308,4 +316,3 @@ class OCRResult:
             )
             if self.low_confidence_fields:
                 self.needs_review = True
-
