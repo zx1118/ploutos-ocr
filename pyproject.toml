@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ploutos-ocr"
+version = "1.0.0"
+description = "OCR Service with PaddleOCR, Redis Stream and FastAPI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "RCoE Team", email = "rcoe@epiroc.com"}
+]
+
+[project.scripts]
+ocr-worker = "ocr_worker.main:run_worker"
+ocr-api = "ocr_worker.api.main:run_api"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ocr_worker*"]
+
