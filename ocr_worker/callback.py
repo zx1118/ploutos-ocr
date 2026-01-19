@@ -74,12 +74,17 @@ class CallbackClient:
             # Build complete OCR result with all structure data
             ocr_result_payload = {
                 "text": result_dict["fullText"],
+                "layoutText": result_dict.get("layoutText", ""),
                 "blocks": result_dict["blocks"],
             }
             
             # Include row clustering results (行聚类结果)
             if result_dict.get("rows"):
                 ocr_result_payload["rows"] = result_dict["rows"]
+
+            # Include document structure (MinerU-style)
+            if result_dict.get("documentStructure"):
+                ocr_result_payload["documentStructure"] = result_dict["documentStructure"]
             
             # Include table structure (表格结构：列、行区域)
             if result_dict.get("tableStructure"):

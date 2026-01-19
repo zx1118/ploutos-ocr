@@ -1017,3 +1017,98 @@ def extract_table_structure_advanced(
     }
     
     return result
+
+
+def build_layout_text(rows: List[Dict[str, Any]]) -> str:
+    """Build layout-aware text by joining row text."""
+    if not rows:
+        return ""
+    lines = []
+    for row in rows:
+        row_text = (row.get("text") or "").strip()
+        if row_text:
+            lines.append(row_text)
+    return "\n".join(lines)
+
+
+def build_document_structure(
+    rows: List[Dict[str, Any]],
+    table_structure: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Build a MinerU-style document structure output.
+
+    Returns:
+        {
+            "lines": [...],
+            "tables": [...],
+        }
+    """
+    lines = []
+    for row in rows or []:
+        row_text = (row.get("text") or "").strip()
+        if not row_text:
+            continue
+        items = []
+        for item in row.get("items", []) or []:
+            items.append({
+                "text": item.get("text", ""),
+                "columnIndex": item.get("columnIndex", -1),
+                "columnName": item.get("columnName", ""),
+                "bbox": item.get("bbox"),
+            })
+        lines.append({
+            "rowIndex": row.get("rowIndex"),
+            "rowType": row.get("rowType", ""),
+            "text": row_text,
+            "items": items,
+            "yMin": row.get("yMin"),
+            "yMax": row.get("yMax"),
+            "yCenter": row.get("yCenter"),
+        })
+
+    tables = []
+    if table_structure and table_structure.get("rows"):
+        headers = table_structure.get("columnHeaders", []) or []
+        structured_rows = []
+        for row in table_structure.get("rows", []) or []:
+            cells = []
+            values: Dict[str, str] = {}
+            for item in row.get("items", []) or []:
+                column_index = item.get("columnIndex", -1)
+                column_name = item.get("columnName", "")
+                header_name = ""
+                if 0 <= column_index < len(headers):
+                    header_name = headers[column_index]
+                column_key = column_name or header_name or f"col_{column_index}"
+                text = item.get("text", "")
+                cells.append({
+                    "text": text,
+                    "columnIndex": column_index,
+                    "columnName": column_name or header_name,
+                    "bbox": item.get("bbox"),
+                })
+                if column_key:
+                    if column_key in values and text:
+                        values[column_key] = f"{values[column_key]} {text}".strip()
+                    else:
+                        values[column_key] = text
+            structured_rows.append({
+                "rowIndex": row.get("rowIndex"),
+                "rowType": row.get("rowType", ""),
+                "text": row.get("text", ""),
+                "cells": cells,
+                "values": values,
+            })
+        tables.append({
+            "headers": headers,
+            "rows": structured_rows,
+            "rowCount": table_structure.get("rowCount", 0),
+            "columnCount": table_structure.get("columnCount", 0),
+            "regions": table_structure.get("regions", {}),
+        })
+
+    return {
+        "lines": lines,
+        "tables": tables,
+    }
