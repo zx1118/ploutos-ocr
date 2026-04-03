@@ -259,13 +259,18 @@ class RowClusteringEngine:
             
             logger.debug(f"Vertical block '{clean_text[:5]}...' ({char_count} chars): found {len(rows_in_range)} anchor rows in Y range [{vb['y_min']:.0f}, {vb['y_max']:.0f}]")
             
-            if rows_in_range and len(rows_in_range) >= char_count:
-                # Use anchor positions - assign one character to each row
-                # Take only the first char_count rows
-                rows_to_use = rows_in_range[:char_count]
+            if rows_in_range:
+                # KEY FIX: Use anchor row count, not character count
+                # If OCR detected fewer chars than actual rows (e.g., 13 "件" but 18 rows),
+                # we should create one entry for EACH anchor row using the repeated character
                 
-                for i, char in enumerate(clean_text):
-                    row_y = rows_to_use[i]
+                # Get the repeated character (most common char in the text)
+                from collections import Counter
+                char_counter = Counter(clean_text)
+                repeated_char = char_counter.most_common(1)[0][0]
+                
+                # Create one block for each anchor row
+                for row_y in rows_in_range:
                     half_height = avg_height / 2
                     
                     new_bbox = [
@@ -276,13 +281,13 @@ class RowClusteringEngine:
                     ]
                     
                     result.append({
-                        "text": char,
+                        "text": repeated_char,
                         "confidence": block.get("confidence", 0.0),
                         "bbox": new_bbox,
                     })
                 
                 split_count += 1
-                logger.info(f"Split vertical '{clean_text[:5]}...' ({char_count} chars) -> aligned to {len(rows_to_use)} rows")
+                logger.info(f"Split vertical '{repeated_char * min(5, char_count)}...' -> {len(rows_in_range)} rows (OCR detected {char_count} chars, expanded to {len(rows_in_range)} anchor rows)")
             else:
                 # Fallback: evenly distribute based on character count
                 y_min, y_max = vb["y_min"], vb["y_max"]
@@ -701,13 +706,20 @@ class AdaptiveColumnDetector:
     INVOICE_HEADERS = {
         "项目名称": ["项目名称", "品名", "货物名称", "服务名称", "商品名称", "名称"],
         "规格型号": ["规格型号", "规格", "型号"],
-        "单位": ["单位", "计量单位"],
-        "数量": ["数量", "数", "件数"],
-        "单价": ["单价", "不含税单价", "价格"],
-        "金额": ["金额", "不含税金额", "合计金额"],
-        "税率": ["税率", "征收率", "税率/征收率"],
-        "税额": ["税额", "增值税额"],
+        "单位": ["单位", "计量单位", "单 位"],  # 发票中可能有空格分隔
+        "数量": ["数量", "数", "件数", "数 量"],
+        "单价": ["单价", "不含税单价", "价格", "单 价"],
+        "金额": ["金额", "不含税金额", "合计金额", "金 额"],
+        "税率": ["税率", "征收率", "税率/征收率", "税率/", "税 率"],
+        "税额": ["税额", "增值税额", "税 额"],
     }
+    
+    # Standard invoice header order (for reconstruction)
+    STANDARD_INVOICE_HEADERS = ["项目名称", "规格型号", "单位", "数量", "单价", "金额", "税率", "税额"]
+    
+    # Values that should NOT be treated as headers (common data values)
+    # Note: "位" is NOT in this list because it might be part of "单位" header
+    NOT_HEADERS = ["件", "个", "台", "套", "只", "张", "条", "kg", "m", "m2", "m3"]
     
     def __init__(self):
         self.column_order = list(self.INVOICE_HEADERS.keys())
@@ -761,20 +773,42 @@ class AdaptiveColumnDetector:
     
     def _find_header_row(self, rows: List[TableRow]) -> Tuple[Optional[TableRow], int]:
         """Find the header row by keyword matching."""
-        for idx, row in enumerate(rows[:5]):
-            row_text = " ".join(item.text for item in row.items).lower()
+        best_row = None
+        best_idx = -1
+        best_matches = 0
+        
+        for idx, row in enumerate(rows[:8]):  # Check more rows
+            row_text = " ".join(item.text for item in row.items)
+            row_text_lower = row_text.lower().replace(" ", "")
             
             # Count header keyword matches
             matches = 0
-            for variants in self.INVOICE_HEADERS.values():
+            matched_headers = []
+            for header_name, variants in self.INVOICE_HEADERS.items():
                 for v in variants:
-                    if v.lower() in row_text:
+                    v_lower = v.lower().replace(" ", "")
+                    if v_lower in row_text_lower:
                         matches += 1
+                        matched_headers.append(header_name)
                         break
             
-            if matches >= 3:  # At least 3 header keywords found
-                return row, idx
+            # Also check if row contains common data values (suggests it's a data row, not header)
+            has_data_values = any(nv in row_text for nv in self.NOT_HEADERS)
+            if has_data_values:
+                matches = max(0, matches - 1)  # Penalize rows with data values
+            
+            logger.debug(f"Row {idx} header check: matches={matches}, items={row_text[:80]}..., matched={matched_headers}")
+            
+            if matches > best_matches:
+                best_matches = matches
+                best_row = row
+                best_idx = idx
         
+        if best_matches >= 3:  # At least 3 header keywords found
+            logger.info(f"Found header row at index {best_idx} with {best_matches} matches")
+            return best_row, best_idx
+        
+        logger.debug(f"No header row found (best match: {best_matches})")
         return None, -1
     
     def _extract_from_header(self, header_row: TableRow) -> Tuple[List[str], List[Tuple[float, float]]]:
@@ -788,20 +822,142 @@ class AdaptiveColumnDetector:
         if not header_row.items:
             return [], []
         
+        # Log header row items for debugging
+        raw_items = [item.text.strip() for item in header_row.items]
+        logger.info(f"Header row raw items ({len(raw_items)}): {raw_items}")
+        
         headers = []
         item_centers = []  # (x_center, x_min, x_max, header_name)
         
+        # First pass: collect all items and their positions
+        all_items = []
         for item in header_row.items:
-            # Normalize header text
             header_text = item.text.strip()
-            normalized = self._normalize_header(header_text)
-            headers.append(normalized or header_text)
-            
-            # Get position
             xs = [p[0] for p in item.bbox]
             x_min, x_max = min(xs), max(xs)
             x_center = (x_min + x_max) / 2
-            item_centers.append((x_center, x_min, x_max))
+            all_items.append({
+                "text": header_text,
+                "x_center": x_center,
+                "x_min": x_min,
+                "x_max": x_max,
+                "bbox": item.bbox
+            })
+        
+        # Sort by X position
+        all_items.sort(key=lambda x: x["x_center"])
+        
+        # Second pass: process items, handling special cases
+        i = 0
+        while i < len(all_items):
+            item = all_items[i]
+            header_text = item["text"]
+            
+            # Skip common data values that shouldn't be headers
+            if header_text in self.NOT_HEADERS:
+                logger.debug(f"Skipping non-header item: '{header_text}'")
+                i += 1
+                continue
+            
+            # Handle special case: single char "单" or "位" might need merging
+            # or "件" appearing in header position should be treated as "单位" column marker
+            if len(header_text) == 1:
+                # Check if next item is also single char and close by
+                if i + 1 < len(all_items):
+                    next_item = all_items[i + 1]
+                    x_gap = next_item["x_min"] - item["x_max"]
+                    
+                    # If two adjacent single chars, try to merge them
+                    if len(next_item["text"]) == 1 and x_gap < 50:
+                        merged_text = header_text + next_item["text"]
+                        normalized = self._normalize_header(merged_text)
+                        if normalized:
+                            logger.debug(f"Merging '{header_text}' + '{next_item['text']}' -> '{normalized}'")
+                            headers.append(normalized)
+                            # Use combined position
+                            x_min = item["x_min"]
+                            x_max = next_item["x_max"]
+                            x_center = (x_min + x_max) / 2
+                            item_centers.append((x_center, x_min, x_max))
+                            i += 2  # Skip both items
+                            continue
+                
+                # Special case: "位" alone likely means "单位" column
+                if header_text == "位":
+                    logger.debug(f"Converting lone '位' to '单位'")
+                    headers.append("单位")
+                    item_centers.append((item["x_center"], item["x_min"], item["x_max"]))
+                    i += 1
+                    continue
+                
+                # Single character that couldn't be merged
+                # Skip if it's a unit value appearing in header position (like "件" from vertical text)
+                if header_text in ["件", "个", "台", "套", "只", "张", "条"]:
+                    logger.debug(f"Skipping unit value in header: '{header_text}'")
+                    i += 1
+                    continue
+                
+                # Check if it's a known header part
+                is_known_header = False
+                for variants in self.INVOICE_HEADERS.values():
+                    if any(header_text in v for v in variants):
+                        is_known_header = True
+                        break
+                if not is_known_header:
+                    logger.debug(f"Skipping unknown single-char: '{header_text}'")
+                    i += 1
+                    continue
+            
+            # Normalize the header text
+            normalized = self._normalize_header(header_text)
+            headers.append(normalized or header_text)
+            item_centers.append((item["x_center"], item["x_min"], item["x_max"]))
+            i += 1
+        
+        logger.info(f"Extracted headers ({len(headers)}): {headers}")
+        
+        # Post-process: reconstruct standard invoice headers
+        # If this looks like an invoice header row (has key invoice headers like 项目名称, 数量, 金额)
+        # and has fewer than 8 columns, use standard invoice header template
+        
+        key_invoice_headers = {"项目名称", "数量", "金额"}
+        present_key_headers = key_invoice_headers.intersection(set(headers))
+        
+        if len(present_key_headers) >= 2 and len(headers) < 8:
+            logger.info(f"Detected invoice header row with {len(headers)} columns, reconstructing to 8 columns")
+            
+            # Map extracted headers to their X positions
+            header_positions = {}
+            for i, h in enumerate(headers):
+                if i < len(item_centers):
+                    header_positions[h] = item_centers[i]
+            
+            # Build new header list using standard order, preserving positions where available
+            new_headers = []
+            new_item_centers = []
+            
+            # Estimate column width and start position
+            if item_centers:
+                x_min = min(ic[1] for ic in item_centers)  # leftmost x_min
+                x_max = max(ic[2] for ic in item_centers)  # rightmost x_max
+                total_width = x_max - x_min
+                col_width = total_width / 8  # 8 columns
+                
+                for i, std_header in enumerate(self.STANDARD_INVOICE_HEADERS):
+                    if std_header in header_positions:
+                        new_headers.append(std_header)
+                        new_item_centers.append(header_positions[std_header])
+                    else:
+                        # Estimate position for missing header
+                        est_x_center = x_min + (i + 0.5) * col_width
+                        est_x_min = x_min + i * col_width
+                        est_x_max = x_min + (i + 1) * col_width
+                        new_headers.append(std_header)
+                        new_item_centers.append((est_x_center, est_x_min, est_x_max))
+                
+                headers = new_headers
+                item_centers = new_item_centers
+                logger.info(f"Reconstructed invoice headers: {headers}")
         
         # Calculate column boundaries as midpoints between adjacent headers
         positions = []

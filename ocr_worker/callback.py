@@ -72,10 +72,20 @@ class CallbackClient:
             result_dict = ocr_result.to_dict()
             
             # Build complete OCR result with all structure data
+            img_w = result_dict.get("imageWidth", 0)
+            img_h = result_dict.get("imageHeight", 0)
+            logger.info(f"OCR result image size: {img_w}x{img_h}")
+            
             ocr_result_payload = {
                 "text": result_dict["fullText"],
                 "layoutText": result_dict.get("layoutText", ""),
                 "blocks": result_dict["blocks"],
+                # 图像尺寸（用于前端正确显示 bbox）
+                "imageWidth": img_w,
+                "imageHeight": img_h,
+                # 多页支持
+                "pageCount": result_dict.get("pageCount", 1),
+                "pageDimensions": result_dict.get("pageDimensions", []),
             }
             
             # Include row clustering results (行聚类结果)

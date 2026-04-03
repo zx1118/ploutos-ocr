@@ -79,7 +79,7 @@ class OcrSettings(BaseSettings):
     
     # Processing options
     use_angle_cls: bool = Field(default=True, description="Use angle classification")
-    pdf_dpi: int = Field(default=150, description="DPI for PDF to image conversion (lower = faster, higher = more accurate)")
+    pdf_dpi: int = Field(default=200, description="DPI for PDF to image conversion (lower = faster, higher = more accurate)")
     
     # Cache settings
     cache_enabled: bool = Field(default=True, description="Enable OCR result caching")
@@ -91,8 +91,9 @@ class OcrSettings(BaseSettings):
     pdf_page_timeout: float = Field(default=60.0, description="Timeout per PDF page in seconds")
     
     # Layout analysis settings
+    # 使用 rule-based 避免 DocLayout-YOLO 坐标偏移问题
     layout_engine: str = Field(
-        default="auto", 
+        default="rule-based", 
         description="Layout engine: auto, paddle-structure, doclayout-yolo, rule-based"
     )
     enable_table_structure: bool = Field(
@@ -109,7 +110,7 @@ class OcrSettings(BaseSettings):
     
     # DocLayout-YOLO layout analysis (方案 B - MinerU 级别)
     use_doclayout_yolo: bool = Field(
-        default=True,
+        default=False,
         description="Use DocLayout-YOLO for MinerU-level layout analysis (方案 B)"
     )
     doclayout_model_path: Optional[str] = Field(

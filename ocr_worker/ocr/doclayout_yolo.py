@@ -214,7 +214,7 @@ class DocLayoutYOLOEngine:
         Analyze document layout.
         
         Args:
-            image_path: Path to image
+            image_path: Path to image or PDF
             return_image: Include annotated image in result
             
         Returns:
@@ -226,6 +226,15 @@ class DocLayoutYOLOEngine:
         start_time = time.time()
         
         logger.info(f"Analyzing layout with DocLayout-YOLO: {image_path}")
+        
+        # Handle PDF files - convert to image first
+        temp_image_path = None
+        if image_path.lower().endswith('.pdf'):
+            temp_image_path = self._convert_pdf_to_image(image_path)
+            if temp_image_path:
+                image_path = temp_image_path
+            else:
+                raise FileNotFoundError(f"Failed to convert PDF to image: {image_path}")
         
         try:
             # Run inference
@@ -291,6 +300,70 @@ class DocLayoutYOLOEngine:
         except Exception as e:
             logger.error(f"Layout analysis failed: {e}")
             raise
+        finally:
+            # Clean up temporary PDF image
+            if temp_image_path:
+                try:
+                    import os
+                    os.unlink(temp_image_path)
+                except Exception:
+                    pass
+    
+    def _convert_pdf_to_image(self, pdf_path: str) -> Optional[str]:
+        """
+        Convert PDF first page to temporary image for YOLO processing.
+        
+        Args:
+            pdf_path: Path to PDF file
+            
+        Returns:
+            Path to temporary image file, or None if conversion failed
+        """
+        try:
+            from pdf2image import convert_from_path
+            from ..config import settings
+            import tempfile
+            import os
+            
+            logger.info(f"Converting PDF to image for DocLayout-YOLO: {Path(pdf_path).name}")
+            
+            # Use same DPI as OCR for consistency
+            pdf_dpi = getattr(settings.ocr, 'pdf_dpi', 200)
+            
+            # Find poppler path (Windows specific)
+            poppler_path = None
+            if os.name == 'nt':  # Windows
+                possible_paths = [
+                    r"C:\Program Files\poppler\Library\bin",
+                    r"C:\poppler\Library\bin",
+                    r"D:\poppler\Library\bin",
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        poppler_path = path
+                        break
+            
+            convert_kwargs = {"dpi": pdf_dpi, "first_page": 1, "last_page": 1}
+            if poppler_path:
+                convert_kwargs["poppler_path"] = poppler_path
+            
+            images = convert_from_path(pdf_path, **convert_kwargs)
+            
+            if not images:
+                return None
+            
+            # Save to temp file
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                images[0].save(tmp.name, "PNG")
+                logger.info(f"PDF converted to temp image: {tmp.name} ({images[0].width}x{images[0].height})")
+                return tmp.name
+                
+        except ImportError:
+            logger.warning("pdf2image not installed, cannot convert PDF for YOLO")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to convert PDF to image: {e}")
+            return None
     
     def detect_tables(
         self,

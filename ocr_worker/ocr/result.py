@@ -37,6 +37,7 @@ class OCRBlock:
     # Optional metadata
     line_index: int = 0
     word_index: int = 0
+    page: int = 1  # 1-based page number
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary with JSON-safe types."""
@@ -46,6 +47,7 @@ class OCRBlock:
             "bbox": to_python_type(self.bbox),
             "lineIndex": int(self.line_index),
             "wordIndex": int(self.word_index),
+            "page": int(self.page),
         }
     
     @classmethod
@@ -182,13 +184,33 @@ class OCRResult:
     image_width: int = 0
     image_height: int = 0
     page_count: int = 1
+    page_dimensions: List[Dict[str, Any]] = field(default_factory=list)  # [{"page":1,"width":w,"height":h}, ...]
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization with safe types."""
+        # Build per-page dimension lookup for normalized coordinates
+        page_dim_map = {}
+        for pd in self.page_dimensions:
+            page_dim_map[pd["page"]] = (pd["width"], pd["height"])
+        
+        blocks_with_normalized = []
+        for b in self.blocks:
+            block_dict = b.to_dict()
+            # Use per-page dimensions for normalization, fall back to global
+            pg = b.page
+            pw, ph = page_dim_map.get(pg, (self.image_width, self.image_height))
+            if pw > 0 and ph > 0 and block_dict.get("bbox"):
+                bbox = block_dict["bbox"]
+                block_dict["bboxNormalized"] = [
+                    [p[0] / pw, p[1] / ph] 
+                    for p in bbox
+                ]
+            blocks_with_normalized.append(block_dict)
+        
         return to_python_type({
             "fullText": str(self.full_text) if self.full_text else "",
             "layoutText": str(self.layout_text) if self.layout_text else "",
-            "blocks": [b.to_dict() for b in self.blocks],
+            "blocks": blocks_with_normalized,
             "rows": self.rows if self.rows else [],
             "documentStructure": self.document_structure if self.document_structure else None,
             "tableStructure": self.table_structure if self.table_structure else None,
@@ -204,6 +226,7 @@ class OCRResult:
             "imageWidth": int(self.image_width) if self.image_width else 0,
             "imageHeight": int(self.image_height) if self.image_height else 0,
             "pageCount": int(self.page_count) if self.page_count else 1,
+            "pageDimensions": self.page_dimensions if self.page_dimensions else [],
         })
     
     def to_json(self) -> str:

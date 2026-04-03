@@ -194,7 +194,7 @@ class OCRConsumer:
         try:
             cache_key = self._get_cache_key(file_path)
             
-            # Serialize blocks to JSON
+            # Serialize blocks to JSON (including page info)
             blocks_data = []
             for block in blocks:
                 if hasattr(block, 'bbox'):
@@ -203,6 +203,7 @@ class OCRConsumer:
                         "bbox": block.bbox,
                         "text": block.text,
                         "confidence": block.confidence,
+                        "page": getattr(block, 'page', 1),
                     })
                 else:
                     # Already a dict
@@ -323,19 +324,44 @@ class OCRConsumer:
         if cached_blocks:
             # Use cached result
             from .ocr.result import OCRResult, OCRBlock
+            from PIL import Image
             
             blocks = [
                 OCRBlock(
                     bbox=b["bbox"],
                     text=b["text"],
-                    confidence=b["confidence"]
+                    confidence=b["confidence"],
+                    page=b.get("page", 1),
                 )
                 for b in cached_blocks
             ]
             
+            # Get image dimensions for correct bbox display
+            image_width, image_height = 0, 0
+            try:
+                with Image.open(message.file_path) as img:
+                    image_width, image_height = img.size
+            except Exception as e:
+                # PDF files need special handling
+                if str(message.file_path).lower().endswith('.pdf'):
+                    try:
+                        from pdf2image import convert_from_path
+                        poppler_path = self._ocr._find_poppler_path() if hasattr(self._ocr, '_find_poppler_path') else None
+                        convert_kwargs = {"dpi": settings.ocr.pdf_dpi}
+                        if poppler_path:
+                            convert_kwargs["poppler_path"] = poppler_path
+                        images = convert_from_path(str(message.file_path), **convert_kwargs, first_page=1, last_page=1)
+                        if images:
+                            image_width, image_height = images[0].size
+                    except Exception as pdf_e:
+                        logger.debug(f"Failed to get PDF dimensions: {pdf_e}")
+                else:
+                    logger.debug(f"Failed to get image dimensions: {e}")
+            
             # Reconstruct OCR result from cache
-            ocr_result = OCRResult(blocks=blocks)
+            ocr_result = OCRResult(blocks=blocks, image_width=image_width, image_height=image_height)
             ocr_result.overall_confidence = sum(b.confidence for b in blocks) / len(blocks) if blocks else 0
+            logger.info(f"OCR cache restored: {len(blocks)} blocks, image size: {image_width}x{image_height}")
         else:
             # 2. Perform OCR
             # For invoices, use PPStructure table recognition for better table extraction
@@ -577,10 +603,16 @@ class OCRConsumer:
             
             logger.info("Running DocLayout-YOLO layout analysis (方案 B)...")
             
-            # Get or create engine
+            # Get or create engine - check PyTorch CUDA availability (not PaddlePaddle)
+            try:
+                import torch
+                use_gpu = torch.cuda.is_available()
+            except ImportError:
+                use_gpu = False
+            
             engine = get_doclayout_yolo_engine(
                 model_path=getattr(settings.ocr, 'doclayout_model_path', None),
-                device="cuda" if settings.ocr.should_use_gpu else "cpu",
+                device="cuda" if use_gpu else "cpu",
             )
             
             # Update confidence threshold if configured
@@ -673,10 +705,11 @@ class OCRConsumer:
         """
         Cluster OCR blocks into logical rows based on Y-coordinate.
         
-        This groups scattered text blocks into rows for better table extraction,
-        especially useful for invoices with many line items.
+        For multi-page documents, processes each page independently to avoid
+        mixing blocks from different pages into the same row.
         
         Features:
+        - Per-page row clustering for multi-page documents
         - Adaptive Y-tolerance based on line height
         - Projection-based column detection
         - Table region segmentation (header/body/total/footer)
@@ -694,53 +727,84 @@ class OCRConsumer:
         if not ocr_result.blocks:
             return
         
-        # Convert blocks to dict format
-        blocks_dict = [
-            {
-                "text": block.text,
-                "confidence": block.confidence,
-                "bbox": block.bbox,
-            }
-            for block in ocr_result.blocks
-        ]
+        # Build per-page dimension lookup
+        page_dim_map = {}
+        for pd in (ocr_result.page_dimensions or []):
+            page_dim_map[pd["page"]] = (pd["width"], pd["height"])
         
-        # Cluster into rows
-        rows = cluster_ocr_blocks_to_rows(blocks_dict)
-        ocr_result.rows = rows
-        ocr_result.layout_text = build_layout_text(rows)
+        # Group blocks by page
+        page_blocks = {}
+        for block in ocr_result.blocks:
+            pg = getattr(block, 'page', 1)
+            page_blocks.setdefault(pg, []).append(block)
         
-        # Extract table structure (with advanced column detection and segmentation)
-        try:
-            table_structure = extract_table_structure_advanced(
-                blocks_dict,
-                image_width=ocr_result.image_width,
-                image_height=ocr_result.image_height,
-            )
+        all_rows = []
+        all_layout_text_parts = []
+        all_table_structure = None
+        all_document_structure = None
+        
+        for page_no in sorted(page_blocks.keys()):
+            blocks = page_blocks[page_no]
+            blocks_dict = [
+                {
+                    "text": block.text,
+                    "confidence": block.confidence,
+                    "bbox": block.bbox,
+                    "page": block.page,
+                }
+                for block in blocks
+            ]
             
-            # Apply template if supplier is recognized
+            pw, ph = page_dim_map.get(page_no, (ocr_result.image_width, ocr_result.image_height))
+            
+            # Cluster into rows for this page
+            rows = cluster_ocr_blocks_to_rows(blocks_dict)
+            
+            # Tag rows with page number
+            for row in rows:
+                row["page"] = page_no
+            
+            all_rows.extend(rows)
+            
+            if len(page_blocks) > 1:
+                all_layout_text_parts.append(f"--- Page {page_no} ---")
+            all_layout_text_parts.append(build_layout_text(rows))
+            
+            # Extract table structure per page
             try:
-                from .ocr.layout_analyzer import apply_template_if_available
-                table_structure = apply_template_if_available(
-                    ocr_result.full_text,
-                    table_structure,
+                table_structure = extract_table_structure_advanced(
+                    blocks_dict,
+                    image_width=pw,
+                    image_height=ph,
+                )
+                
+                try:
+                    from .ocr.layout_analyzer import apply_template_if_available
+                    table_structure = apply_template_if_available(
+                        "\n".join(b["text"] for b in blocks_dict),
+                        table_structure,
+                    )
+                except Exception as e:
+                    logger.debug(f"Template matching skipped: {e}")
+                
+                # For single-page or first page, use as primary table structure
+                if all_table_structure is None:
+                    all_table_structure = table_structure
+                    all_table_structure["page"] = page_no
+                
+                regions = table_structure.get("regions", {})
+                logger.info(
+                    f"Page {page_no} table structure: {table_structure.get('rowCount', 0)} rows, "
+                    f"{table_structure.get('columnCount', 0)} columns, "
+                    f"body={regions.get('bodyCount', 0)}"
                 )
             except Exception as e:
-                logger.debug(f"Template matching skipped: {e}")
-            
-            ocr_result.table_structure = table_structure
-            ocr_result.document_structure = build_document_structure(rows, table_structure)
-            
-            regions = table_structure.get("regions", {})
-            logger.info(
-                f"Table structure extracted: {table_structure.get('rowCount', 0)} rows, "
-                f"{table_structure.get('columnCount', 0)} columns, "
-                f"body={regions.get('bodyCount', 0)}, "
-                f"hasTotal={regions.get('hasTotal', False)}"
-            )
-        except Exception as e:
-            logger.warning(f"Table structure extraction failed: {e}")
-            ocr_result.table_structure = None
-            ocr_result.document_structure = build_document_structure(rows, None)
+                logger.warning(f"Page {page_no} table structure extraction failed: {e}")
+        
+        ocr_result.rows = all_rows
+        ocr_result.layout_text = "\n".join(all_layout_text_parts)
+        ocr_result.table_structure = all_table_structure
+        ocr_result.document_structure = build_document_structure(all_rows, all_table_structure)
 
     def _process_evidence_enrich(self, message: StreamMessage, start_time: float) -> None:
         """Process evidence enrichment task - match fields to OCR bboxes."""
@@ -767,7 +831,8 @@ class OCRConsumer:
                 OCRBlock(
                     bbox=b["bbox"],
                     text=b["text"],
-                    confidence=b["confidence"]
+                    confidence=b["confidence"],
+                    page=b.get("page", 1),
                 )
                 for b in cached_blocks
             ]

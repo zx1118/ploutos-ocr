@@ -546,13 +546,23 @@ class OCREngine:
         all_text_parts = []
         total_confidence = 0.0
         total_blocks = 0
+        page_dimensions = []
         
         import tempfile
         
         for page_idx, image in enumerate(images):
+            page_no = page_idx + 1
+            
             # Check cancellation between pages
             if cancellation_token:
                 cancellation_token.check()
+            
+            # Record page dimensions
+            page_dimensions.append({
+                "page": page_no,
+                "width": image.width,
+                "height": image.height,
+            })
             
             # Save to temp file - use delete=False and manual cleanup for Windows compatibility
             tmp_path = None
@@ -566,18 +576,19 @@ class OCREngine:
                 else:
                     page_result = self._recognize_text(tmp_path)
                 
-                # Merge results
+                # Merge results with page number
                 for block in page_result.blocks:
                     block.line_index += total_blocks
+                    block.page = page_no
                     all_blocks.append(block)
                 
-                all_text_parts.append(f"--- Page {page_idx + 1} ---")
+                all_text_parts.append(f"--- Page {page_no} ---")
                 all_text_parts.append(page_result.full_text)
                 
                 total_confidence += page_result.overall_confidence * len(page_result.blocks)
                 total_blocks += len(page_result.blocks)
                 
-                logger.debug(f"Processed page {page_idx + 1}/{len(images)}")
+                logger.info(f"Processed page {page_no}/{len(images)}: {len(page_result.blocks)} blocks, size={image.width}x{image.height}")
                 
             finally:
                 # Clean up temp file - handle Windows file locking
@@ -590,13 +601,19 @@ class OCREngine:
         # Calculate overall confidence
         overall_conf = total_confidence / total_blocks if total_blocks > 0 else 0.0
         
+        # Use first page dimensions as the global default
+        img_width = images[0].width if images else 0
+        img_height = images[0].height if images else 0
+        logger.info(f"PDF OCR complete: {len(images)} pages, {total_blocks} blocks, first page: {img_width}x{img_height}")
+        
         return OCRResult(
             full_text="\n".join(all_text_parts),
             blocks=all_blocks,
             overall_confidence=overall_conf,
             page_count=len(images),
-            image_width=images[0].width if images else 0,
-            image_height=images[0].height if images else 0,
+            image_width=img_width,
+            image_height=img_height,
+            page_dimensions=page_dimensions,
         )
     
     def reload_model(
